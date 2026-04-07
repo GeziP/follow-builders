@@ -24,7 +24,7 @@ const X_API_BASE = 'https://api.x.com/2';
 const TWEET_LOOKBACK_HOURS = 24;
 const PODCAST_LOOKBACK_HOURS = 72;
 const BLOG_LOOKBACK_HOURS = 72;
-const MAX_TWEETS_PER_USER = 3;
+const MAX_TWEETS_PER_USER = 20;  // 增加每个用户的推文上限
 const MAX_ARTICLES_PER_BLOG = 3;
 
 // State file lives in the repo root so it gets committed by GitHub Actions
@@ -99,10 +99,9 @@ async function fetchYouTubeContent(podcasts, apiKey, state, errors) {
       const videosData = await videosRes.json();
       const videoIds = videosData.videoIds || videosData.video_ids || [];
 
-      // Check first 2 videos per channel, skip already-seen ones
+      // Check first 2 videos per channel
       for (const videoId of videoIds.slice(0, 2)) {
-        if (state.seenVideos[videoId]) continue; // dedup
-
+        // 不再去重，每次都获取
         try {
           const metaRes = await fetch(
             `${SUPADATA_BASE}/youtube/video?id=${videoId}`,
@@ -153,8 +152,7 @@ async function fetchYouTubeContent(podcasts, apiKey, state, errors) {
 
     const transcriptData = await transcriptRes.json();
 
-    // Mark as seen
-    state.seenVideos[selected.videoId] = Date.now();
+    // 不再标记为已见
 
     return [{
       source: 'podcast',
@@ -212,7 +210,7 @@ async function fetchXContent(xAccounts, bearerToken, state, errors) {
     }
   }
 
-  // Fetch recent tweets per user (max 3, exclude retweets/replies)
+  // Fetch recent tweets per user (max 20, exclude retweets/replies)
   for (const account of xAccounts) {
     const userData = userMap[account.handle.toLowerCase()];
     if (!userData) continue;
@@ -220,7 +218,7 @@ async function fetchXContent(xAccounts, bearerToken, state, errors) {
     try {
       const res = await fetch(
         `${X_API_BASE}/users/${userData.id}/tweets?` +
-        `max_results=5` +       // fetch 5, then filter to 3 new ones
+        `max_results=100` +       // 增加 API 返回上限，获取更多推文
         `&tweet.fields=created_at,public_metrics,referenced_tweets,note_tweet` +
         `&exclude=retweets,replies` +
         `&start_time=${cutoff.toISOString()}`,
@@ -239,10 +237,10 @@ async function fetchXContent(xAccounts, bearerToken, state, errors) {
       const data = await res.json();
       const allTweets = data.data || [];
 
-      // Filter out already-seen tweets, cap at 3
+      // Collect tweets, cap at MAX_TWEETS_PER_USER
       const newTweets = [];
       for (const t of allTweets) {
-        if (state.seenTweets[t.id]) continue; // dedup
+        // 不再去重，每次都获取过去24小时内的推文
         if (newTweets.length >= MAX_TWEETS_PER_USER) break;
 
         newTweets.push({
@@ -257,9 +255,6 @@ async function fetchXContent(xAccounts, bearerToken, state, errors) {
           isQuote: t.referenced_tweets?.some(r => r.type === 'quoted') || false,
           quotedTweetId: t.referenced_tweets?.find(r => r.type === 'quoted')?.id || null
         });
-
-        // Mark as seen
-        state.seenTweets[t.id] = Date.now();
       }
 
       if (newTweets.length === 0) continue;
@@ -511,16 +506,16 @@ async function fetchBlogContent(blogs, state, errors) {
         candidates = parseClaudeBlogIndex(indexHtml);
       }
 
-      // Step 2: Filter to unseen articles, cap at MAX_ARTICLES_PER_BLOG.
+      // Step 2: Filter to articles within lookback window, cap at MAX_ARTICLES_PER_BLOG.
       // Blog index pages list articles newest-first. We only consider the
       // first few entries (MAX_INDEX_SCAN) to avoid crawling the entire
-      // backlog on first run. Articles with a known date must fall within
+      // backlog. Articles with a known date must fall within
       // the lookback window; articles without dates are accepted if they
       // appear near the top of the listing (likely recent).
       const MAX_INDEX_SCAN = MAX_ARTICLES_PER_BLOG; // only look at the N most recent entries
       const newArticles = [];
       for (const article of candidates.slice(0, MAX_INDEX_SCAN)) {
-        if (state.seenArticles[article.url]) continue; // already seen
+        // 不再去重，每次都获取
         // If we have a date, check it's within the lookback window
         if (article.publishedAt && new Date(article.publishedAt) < cutoff) continue;
         newArticles.push(article);
@@ -572,8 +567,7 @@ async function fetchBlogContent(blogs, state, errors) {
             content: extracted.content
           });
 
-          // Mark as seen
-          state.seenArticles[article.url] = Date.now();
+          // 不再标记为已见
 
           // Small delay between article fetches to be polite
           await new Promise(r => setTimeout(r, 500));
